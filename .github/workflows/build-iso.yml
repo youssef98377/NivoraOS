@@ -8,6 +8,9 @@ on:
         description: "Skip the virtual boot test (1 = skip, 0 = run it)"
         default: "0"
 
+permissions:
+  contents: write   # needed to publish the ISO as a Release (direct .iso download, no zip)
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -34,31 +37,31 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl xorriso squashfs-tools gpgv qemu-system-x86 imagemagick
+          sudo apt-get install -y curl xorriso squashfs-tools gpgv qemu-system-x86 imagemagick python3-pil
 
       - name: Unit tests (calculator)
         working-directory: ${{ env.SRC_DIR }}
         run: python3 tests/test_survey_calc.py
 
-      - name: Build ISO (download -> verify hash -> customize -> repack -> verify)
+      - name: Build ISO (download -> verify hash -> customize -> repack -> verify -> QEMU)
         working-directory: ${{ env.SRC_DIR }}
         run: sudo SKIP_QEMU="${{ github.event.inputs.skip_qemu }}" ./scripts/build.sh
 
-      - name: Upload ISO + checksums + reports
+      # SMALL files first: you can check these on your phone before downloading 2 GB
+      - name: Upload SMALL reports + screenshots (a few MB)
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: nivora-os-iso
+          name: nivora-screenshots-and-reports
           path: |
-            ${{ env.SRC_DIR }}/dist/*.iso
-            ${{ env.SRC_DIR }}/dist/SHA256SUMS
+            ${{ env.SRC_DIR }}/dist/qemu-screenshots/*
+            ${{ env.SRC_DIR }}/dist/SCREENSHOT_ANALYSIS.txt
+            ${{ env.SRC_DIR }}/dist/QEMU_RESULT.txt
+            ${{ env.SRC_DIR }}/dist/VERIFY_REPORT.txt
             ${{ env.SRC_DIR }}/dist/BUILD_INFO.txt
             ${{ env.SRC_DIR }}/dist/PACKAGES.txt
-            ${{ env.SRC_DIR }}/dist/VERIFY_REPORT.txt
-            ${{ env.SRC_DIR }}/dist/QEMU_RESULT.txt
-            ${{ env.SRC_DIR }}/dist/qemu-screenshots/*
-          retention-days: 14
-          compression-level: 0
+            ${{ env.SRC_DIR }}/dist/SHA256SUMS
+          retention-days: 30
 
       - name: Upload logs (always, even on failure)
         if: always()
@@ -66,4 +69,28 @@ jobs:
         with:
           name: nivora-build-logs
           path: ${{ env.SRC_DIR }}/logs/*
+          retention-days: 30
+
+      # Direct .iso download (no zip). The ISO is just under the 2 GiB Release limit.
+      - name: Publish ISO as a GitHub Release (direct download)
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ env.SRC_DIR }}
+        run: |
+          iso=$(ls dist/*.iso | head -1)
+          tag="nivora-run-${{ github.run_number }}"
+          gh release create "$tag" "$iso" dist/SHA256SUMS dist/BUILD_INFO.txt \
+            --repo "${{ github.repository }}" \
+            --title "Nivora OS build #${{ github.run_number }}" \
+            --notes "Live USB image. NOT tested on real hardware. Verify SHA256SUMS before writing to USB."
+
+      - name: Upload ISO as artifact (backup, zipped, large)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nivora-os-iso
+          path: ${{ env.SRC_DIR }}/dist/*.iso
           retention-days: 14
+          compression-level: 0
